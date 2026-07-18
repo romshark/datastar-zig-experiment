@@ -5,7 +5,7 @@ description: Standards for using SQLite from Zig via the vendored C amalgamation
 
 # SQLite from Zig
 
-The database is the vendored amalgamation (`vendor/sqlite/`), compiled by `build.zig` and used through `@cImport`. Getting the threading and statement lifecycle right is where most of the performance and correctness lives.
+The database is the vendored amalgamation (`zig/vendor/sqlite/`), compiled by `build.zig` and used through `@cImport`. Getting the threading and statement lifecycle right is where most of the performance and correctness lives.
 
 ## Threading mode: match it to the sharing pattern
 

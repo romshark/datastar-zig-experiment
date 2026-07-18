@@ -1,0 +1,44 @@
+name: Zig
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'zig/**'
+      - '.github/workflows/zig.yaml'
+  pull_request:
+    paths:
+      - 'zig/**'
+      - '.github/workflows/zig.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: zig
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Formatting: hand-written sources only. src/templates/*.zig is generated
+      # by the zt transpiler at build time, and vendor/ is third-party.
+      - name: Format check
+        run: zig fmt --check build.zig src/*.zig
+
+      # Compiles the vendored SQLite amalgamation, transpiles the zt templates,
+      # and fetches the pinned datastar-zig dependency.
+      - name: Build
+        run: zig build
+
+      - name: Test
+        run: zig build test
