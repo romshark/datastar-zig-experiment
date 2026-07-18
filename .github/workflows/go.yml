@@ -1,0 +1,61 @@
+name: Go
+
+on:
+  push:
+    branches: [main]
+    paths: ['go/**', '.github/workflows/go.yml']
+  pull_request:
+    paths: ['go/**', '.github/workflows/go.yml']
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: go
+
+jobs:
+  test:
+    name: build & test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      # templ is a pinned tool dependency in go.mod, so `go tool templ` uses the
+      # same version the generated files were committed with. A non-empty diff
+      # means users_templ.go is stale.
+      - name: Check templ generation is up to date
+        run: |
+          go tool templ generate
+          git diff --exit-code
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test -race ./...
+
+  # golangci-lint runs as its own job via the official action, per
+  # https://golangci-lint.run/welcome/install/#github-actions
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go/go.mod
+          cache-dependency-path: go/go.sum
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+          working-directory: go

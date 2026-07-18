@@ -1,0 +1,127 @@
+// Users page and its morph-able fragments, as templ templates.
+//
+// Source of truth for the HTML: `templ generate` transpiles this to
+// users_templ.go. Edit this file. templ escapes every { expr }, so database
+// values cannot inject markup. Request flow: see server.go.
+
+package main
+
+import "strconv"
+
+// initialSignals is the initial Datastar signal state, emitted verbatim into
+// the body's data-signals attribute.
+const initialSignals = "{name: '', email: '', role: 'member', deleteId: '', deleteName: ''}"
+
+// DeleteButton is the per-row Delete button. It stashes the row's id and name
+// in data-* attributes and, on click, copies them into signals and opens the
+// shared confirmation dialog — no server round-trip to open the dialog.
+templ DeleteButton(u User) {
+	<button
+		type="button"
+		class="danger"
+		data-user-id={ strconv.FormatInt(u.ID, 10) }
+		data-user-name={ u.Name }
+		data-on:click="$deleteId = el.dataset.userId; $deleteName = el.dataset.userName; document.getElementById('confirm-dialog').showModal()"
+	>Delete</button>
+}
+
+// Table is just the <table id="users"> element.
+templ Table(users []User) {
+	<table id="users">
+		<caption>{ strconv.Itoa(len(users)) } user(s), live-updated over SSE</caption>
+		<thead>
+			<tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th></th></tr>
+		</thead>
+		<tbody>
+			for _, u := range users {
+				<tr>
+					<td>{ strconv.FormatInt(u.ID, 10) }</td>
+					<td>{ u.Name }</td>
+					<td>{ u.Email }</td>
+					<td class="role">{ u.Role }</td>
+					<td>
+						@DeleteButton(u)
+					</td>
+				</tr>
+			}
+		</tbody>
+	</table>
+}
+
+// Content is the #content region: the fat-morph target pushed by the /updates
+// stream.
+templ Content(users []User) {
+	<main id="content">
+		@Table(users)
+	</main>
+}
+
+// AddForm is the shared inner form for the add-user dialog. Each field's error,
+// when present (non-empty), is shown directly beneath that field's input.
+templ AddForm(nameErr, emailErr string) {
+	<form method="dialog">
+		<h2>Add user</h2>
+		<label>Name<input data-bind:name placeholder="Jane Doe"/></label>
+		if nameErr != "" {
+			<p class="field-error">{ nameErr }</p>
+		}
+		<label>Email<input type="email" data-bind:email placeholder="jane@example.com"/></label>
+		if emailErr != "" {
+			<p class="field-error">{ emailErr }</p>
+		}
+		<label>
+			Role
+			<select data-bind:role>
+				<option value="member">member</option>
+				<option value="admin">admin</option>
+			</select>
+		</label>
+		<menu>
+			<button value="cancel">Cancel</button>
+			<button type="button" class="primary" data-on:click="@post('/users/')">Save</button>
+		</menu>
+	</form>
+}
+
+// AddDialog is the add-user dialog. open renders it in the open state (used when
+// re-rendering after a validation error so the morph keeps it up).
+templ AddDialog(open bool, nameErr, emailErr string) {
+	<dialog id="add-dialog" open?={ open }>
+		@AddForm(nameErr, emailErr)
+	</dialog>
+}
+
+// Page is the full HTML document (the shell that boots the SSE stream). The
+// toolbar and dialogs sit outside #content so a morph never clobbers them.
+templ Page(users []User) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>Users</title>
+			<script type="module" src="/datastar.js"></script>
+			<link rel="stylesheet" href="/app.css"/>
+		</head>
+		<body data-signals={ initialSignals } data-init="@get('/updates')">
+			<h1>Users</h1>
+			<div class="toolbar">
+				<button class="primary" data-on:click="document.getElementById('add-dialog').showModal()">Add user</button>
+				<span class="theme-tag">Theme: <b id="theme-name">…</b> (follows your system)</span>
+			</div>
+			@Content(users)
+			@AddDialog(false, "", "")
+			<dialog id="confirm-dialog">
+				<form method="dialog">
+					<h2>Delete user</h2>
+					<p>Really delete <strong data-text="$deleteName"></strong>?</p>
+					<menu>
+						<button value="cancel">Cancel</button>
+						<button type="button" class="danger" data-on:click="@delete('/users/' + $deleteId); document.getElementById('confirm-dialog').close()">Delete</button>
+					</menu>
+				</form>
+			</dialog>
+			<script src="/app.js"></script>
+		</body>
+	</html>
+}

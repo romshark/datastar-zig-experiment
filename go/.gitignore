@@ -1,0 +1,4 @@
+/zigvibe
+*.db
+*.db-shm
+*.db-wal
