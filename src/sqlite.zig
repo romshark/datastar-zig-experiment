@@ -1,8 +1,14 @@
 //! Zig wrapper over the vendored SQLite C API: open a database, execute
 //! statements, iterate result rows. C result codes map to `Error`; the message
 //! stays reachable via `Db.errmsg`.
+//!
+//! A `Db` is used by a single thread (opened with `SQLITE_OPEN_NOMUTEX`), so it
+//! holds an unsynchronized prepared-statement cache: `prepareCached` compiles
+//! each SQL string once and reuses it.
 
 const std = @import("std");
+
+const Allocator = std.mem.Allocator;
 
 pub const c = @cImport({
     @cInclude("sqlite3.h");
@@ -33,7 +39,7 @@ const bindTextRaw = @extern(*const fn (
     ?*const anyopaque,
 ) callconv(.c) c_int, .{ .name = "sqlite3_bind_text" });
 
-/// Translate a raw SQLite result code into a Zig error (or success).
+/// Map a SQLite result code to `Error` (success codes map to no error).
 fn check(rc: c_int) Error!void {
     return switch (rc) {
         c.SQLITE_OK, c.SQLITE_ROW, c.SQLITE_DONE => {},
@@ -46,25 +52,43 @@ fn check(rc: c_int) Error!void {
 
 pub const Db = struct {
     handle: *c.sqlite3,
+    gpa: Allocator,
+    /// SQL string -> compiled statement. Keys must be stable for the `Db`'s
+    /// lifetime; all callers pass string literals.
+    stmt_cache: std.StringHashMapUnmanaged(*c.sqlite3_stmt),
 
     /// Open (creating if necessary) the database at `path`. Pass `":memory:"`
     /// for a private in-memory database.
-    pub fn open(path: [:0]const u8) Error!Db {
+    ///
+    /// The connection is opened in multi-thread mode (`SQLITE_OPEN_NOMUTEX`):
+    /// no per-call mutex. This is safe because a `Db` is never shared between
+    /// threads — each worker opens its own. WAL is enabled so readers do not
+    /// block the single writer.
+    pub fn open(gpa: Allocator, path: [:0]const u8) Error!Db {
         var handle: ?*c.sqlite3 = null;
-        const flags = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE;
+        const flags = c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_NOMUTEX;
         const rc = c.sqlite3_open_v2(path.ptr, &handle, flags, null);
         errdefer if (handle) |h| {
             _ = c.sqlite3_close(h);
         };
         try check(rc);
         const h = handle orelse return Error.OutOfMemory;
-        // With multiple connections (one per HTTP connection) touching the same
-        // file, let a busy connection wait rather than fail immediately.
+
+        // A busy connection waits (up to 5s) rather than failing immediately.
         _ = c.sqlite3_busy_timeout(h, 5000);
-        return .{ .handle = h };
+
+        var db: Db = .{ .handle = h, .gpa = gpa, .stmt_cache = .empty };
+        // WAL: concurrent readers alongside one writer; NORMAL sync is durable
+        // under WAL. Both are no-ops on `:memory:`.
+        db.exec("PRAGMA journal_mode = WAL;") catch {};
+        db.exec("PRAGMA synchronous = NORMAL;") catch {};
+        return db;
     }
 
     pub fn close(self: *Db) void {
+        var it = self.stmt_cache.valueIterator();
+        while (it.next()) |h| _ = c.sqlite3_finalize(h.*);
+        self.stmt_cache.deinit(self.gpa);
         _ = c.sqlite3_close(self.handle);
         self.* = undefined;
     }
@@ -85,16 +109,29 @@ pub const Db = struct {
         try check(c.sqlite3_exec(self.handle, sql.ptr, null, null, null));
     }
 
-    /// Compile a single SQL statement. `sql` need not be null-terminated.
+    /// Compile `sql` once and cache it; subsequent calls return the same
+    /// statement, reset with its bindings cleared, ready to bind and step. The
+    /// cache owns the statement (finalized in `close`); callers must not
+    /// `deinit` it. `sql` must be a stable string (a literal).
+    pub fn prepareCached(self: *Db, sql: []const u8) Error!Stmt {
+        if (self.stmt_cache.get(sql)) |h| {
+            _ = c.sqlite3_reset(h);
+            _ = c.sqlite3_clear_bindings(h);
+            return .{ .handle = h };
+        }
+        var handle: ?*c.sqlite3_stmt = null;
+        try check(c.sqlite3_prepare_v2(self.handle, sql.ptr, @intCast(sql.len), &handle, null));
+        const h = handle orelse return Error.Sqlite;
+        errdefer _ = c.sqlite3_finalize(h);
+        try self.stmt_cache.put(self.gpa, sql, h);
+        return .{ .handle = h };
+    }
+
+    /// Compile a single, uncached statement the caller owns and must `deinit`.
+    /// For one-off statements not worth caching.
     pub fn prepare(self: *Db, sql: []const u8) Error!Stmt {
         var handle: ?*c.sqlite3_stmt = null;
-        try check(c.sqlite3_prepare_v2(
-            self.handle,
-            sql.ptr,
-            @intCast(sql.len),
-            &handle,
-            null,
-        ));
+        try check(c.sqlite3_prepare_v2(self.handle, sql.ptr, @intCast(sql.len), &handle, null));
         return .{ .handle = handle orelse return Error.Sqlite };
     }
 };
@@ -102,6 +139,8 @@ pub const Db = struct {
 pub const Stmt = struct {
     handle: *c.sqlite3_stmt,
 
+    /// Finalize an uncached statement (from `Db.prepare`). Never call on a
+    /// statement from `Db.prepareCached`; the cache owns those.
     pub fn deinit(self: *Stmt) void {
         _ = c.sqlite3_finalize(self.handle);
         self.* = undefined;
@@ -154,31 +193,36 @@ pub const Stmt = struct {
     }
 };
 
-test "open in-memory, create, insert, and query" {
-    var db = try Db.open(":memory:");
+test "open in-memory, create, insert, and query with a cached statement" {
+    var db = try Db.open(std.testing.allocator, ":memory:");
     defer db.close();
 
     try db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL);");
 
-    var ins = try db.prepare("INSERT INTO t (name) VALUES (?1);");
-    defer ins.deinit();
+    var ins = try db.prepareCached("INSERT INTO t (name) VALUES (?1);");
     try ins.bindText(1, "alice");
     try std.testing.expect(!try ins.step());
 
-    var sel = try db.prepare("SELECT id, name FROM t;");
-    defer sel.deinit();
+    // Same SQL returns the same (reset) cached statement.
+    var ins2 = try db.prepareCached("INSERT INTO t (name) VALUES (?1);");
+    try std.testing.expectEqual(ins.handle, ins2.handle);
+    try ins2.bindText(1, "bob");
+    try std.testing.expect(!try ins2.step());
+
+    var sel = try db.prepareCached("SELECT id, name FROM t ORDER BY id;");
     try std.testing.expect(try sel.step());
     try std.testing.expectEqual(@as(i64, 1), sel.columnInt64(0));
     try std.testing.expectEqualStrings("alice", sel.columnText(1));
+    try std.testing.expect(try sel.step());
+    try std.testing.expectEqualStrings("bob", sel.columnText(1));
     try std.testing.expect(!try sel.step());
 }
 
 test "constraint violation maps to error" {
-    var db = try Db.open(":memory:");
+    var db = try Db.open(std.testing.allocator, ":memory:");
     defer db.close();
     try db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT NOT NULL);");
 
-    var ins = try db.prepare("INSERT INTO t (id, name) VALUES (1, NULL);");
-    defer ins.deinit();
+    var ins = try db.prepareCached("INSERT INTO t (id, name) VALUES (1, NULL);");
     try std.testing.expectError(Error.Constraint, ins.step());
 }

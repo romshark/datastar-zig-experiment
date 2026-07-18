@@ -32,7 +32,7 @@ pub fn main(init: std.process.Init) !void {
     // Open the database once at startup to create/seed it before any request
     // is served. Each connection later opens its own handle to the same file.
     {
-        var setup_db = try sqlite.Db.open(db_path);
+        var setup_db = try sqlite.Db.open(gpa, db_path);
         defer setup_db.close();
         try db.init(&setup_db);
         std.log.info("database ready at {s}", .{db_path});

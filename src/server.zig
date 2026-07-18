@@ -11,8 +11,14 @@
 //!     feedback (e.g. a re-rendered dialog on a validation error), never the
 //!     table.
 //!
-//! Each connection is served on its own thread with its own database handle;
-//! a shared `Hub` (a lock-free version counter) coordinates them.
+//! Connections are served by a fixed pool of worker threads (bounded, reused —
+//! not one spawned thread per connection). Each worker owns its own database
+//! connection and request arena and loops accept -> serve -> reset. A shared
+//! `Hub` (a lock-free version counter) coordinates the streams.
+//!
+//! A long-lived `/updates` stream occupies its worker for its lifetime, so the
+//! pool size bounds the number of concurrent clients. A server expecting many
+//! idle streaming connections would use evented I/O instead.
 
 const std = @import("std");
 const datastar = @import("datastar");
@@ -63,79 +69,97 @@ const heartbeat_polls = 75;
 
 pub const Options = struct {
     address: net.IpAddress,
-    /// Path to the SQLite database file (each connection opens its own handle).
+    /// Path to the SQLite database file (each worker opens its own handle).
     db_path: [:0]const u8,
 };
 
-/// Bind, listen, and serve connections until the process is terminated.
-pub fn run(io: Io, allocator: Allocator, options: Options) !void {
+/// Bind, listen, and serve connections on a fixed worker pool until the process
+/// is terminated.
+pub fn run(io: Io, gpa: Allocator, options: Options) !void {
     var hub: Hub = .{};
 
     var address = options.address;
     var listener = try address.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
 
-    log.info("listening on http://{f}", .{options.address});
+    const cpu = std.Thread.getCpuCount() catch 4;
+    const worker_count = std.math.clamp(cpu * 4, 8, 128);
+    log.info("listening on http://{f} ({d} workers)", .{ options.address, worker_count });
 
-    while (true) {
-        const stream = listener.accept(io) catch |err| {
-            log.warn("accept failed: {s}", .{@errorName(err)});
-            continue;
-        };
-        const thread = std.Thread.spawn(.{}, connectionThread, .{ io, stream, allocator, options.db_path, &hub }) catch |err| {
-            log.warn("could not spawn connection thread: {s}", .{@errorName(err)});
-            stream.close(io);
-            continue;
-        };
-        thread.detach();
+    const workers = try gpa.alloc(std.Thread, worker_count);
+    defer gpa.free(workers);
+    for (workers) |*t| {
+        t.* = try std.Thread.spawn(.{}, worker, .{ io, &listener, gpa, options.db_path, &hub });
     }
+    for (workers) |t| t.join();
 }
 
-/// Thread entry point: owns `stream` and a fresh database handle for its
-/// lifetime, logging (rather than propagating) any per-connection error.
-fn connectionThread(io: Io, stream: net.Stream, allocator: Allocator, db_path: [:0]const u8, hub: *Hub) void {
-    defer stream.close(io);
-
-    var conn_db = sqlite.Db.open(db_path) catch |err| {
-        log.warn("could not open database: {s}", .{@errorName(err)});
+/// Worker loop: own one database connection and one request arena for the
+/// worker's lifetime, and handle accepted connections one at a time. The kernel
+/// load-balances `accept` across workers on the shared listening socket.
+fn worker(io: Io, listener: *net.Server, gpa: Allocator, db_path: [:0]const u8, hub: *Hub) void {
+    var conn_db = sqlite.Db.open(gpa, db_path) catch |err| {
+        log.err("worker: cannot open database: {s}", .{@errorName(err)});
         return;
     };
     defer conn_db.close();
 
-    runConnection(io, stream, allocator, &conn_db, hub) catch |err| switch (err) {
-        error.WriteFailed, error.ReadFailed => {}, // client hung up; nothing to do
-        else => log.warn("connection error: {s}", .{@errorName(err)}),
-    };
-}
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
 
-fn runConnection(io: Io, stream: net.Stream, allocator: Allocator, conn_db: *sqlite.Db, hub: *Hub) !void {
     var recv_buffer: [header_buffer_len]u8 = undefined;
     var send_buffer: [send_buffer_len]u8 = undefined;
 
-    var reader = stream.reader(io, &recv_buffer);
-    var writer = stream.writer(io, &send_buffer);
+    while (true) {
+        const stream = listener.accept(io) catch |err| switch (err) {
+            error.SocketNotListening, error.Canceled => return, // shutdown
+            else => {
+                log.warn("accept failed: {s}", .{@errorName(err)});
+                continue;
+            },
+        };
+        serveConnection(io, stream, &conn_db, hub, &arena, &recv_buffer, &send_buffer) catch |err| switch (err) {
+            error.WriteFailed, error.ReadFailed => {}, // client hung up; nothing to do
+            else => log.warn("connection error: {s}", .{@errorName(err)}),
+        };
+        stream.close(io);
+        _ = arena.reset(.retain_capacity);
+    }
+}
 
+fn serveConnection(
+    io: Io,
+    stream: net.Stream,
+    conn_db: *sqlite.Db,
+    hub: *Hub,
+    arena: *std.heap.ArenaAllocator,
+    recv_buffer: []u8,
+    send_buffer: []u8,
+) !void {
+    var reader = stream.reader(io, recv_buffer);
+    var writer = stream.writer(io, send_buffer);
     var http_server = std.http.Server.init(&reader.interface, &writer.interface);
-    try serve(io, &http_server, allocator, conn_db, hub);
+    try serve(io, &http_server, conn_db, hub, arena);
 }
 
 /// Read and answer requests until the connection should no longer be kept
-/// alive. Transport-agnostic: works over any reader/writer, including the
-/// in-memory pair used by the tests.
-pub fn serve(io: Io, http_server: *std.http.Server, allocator: Allocator, conn_db: *sqlite.Db, hub: *Hub) !void {
+/// alive, resetting the arena after each. Transport-agnostic: works over any
+/// reader/writer, including the in-memory pair used by the tests.
+pub fn serve(io: Io, http_server: *std.http.Server, conn_db: *sqlite.Db, hub: *Hub, arena: *std.heap.ArenaAllocator) !void {
     while (true) {
         var request = http_server.receiveHead() catch |err| switch (err) {
             error.HttpConnectionClosing => return,
             else => return err,
         };
-        const keep_alive = try handleRequest(io, &request, allocator, conn_db, hub);
+        const keep_alive = try handleRequest(io, &request, conn_db, hub, arena);
+        _ = arena.reset(.retain_capacity);
         if (!keep_alive) return;
     }
 }
 
 /// Route and answer a single request. Returns whether the connection should be
 /// kept alive for a subsequent request.
-fn handleRequest(io: Io, request: *std.http.Server.Request, allocator: Allocator, conn_db: *sqlite.Db, hub: *Hub) !bool {
+fn handleRequest(io: Io, request: *std.http.Server.Request, conn_db: *sqlite.Db, hub: *Hub, arena: *std.heap.ArenaAllocator) !bool {
     const target = request.head.target;
     const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
 
@@ -143,7 +167,7 @@ fn handleRequest(io: Io, request: *std.http.Server.Request, allocator: Allocator
         .GET, .HEAD => {
             if (std.mem.eql(u8, path, "/updates")) {
                 if (request.head.method != .GET) return respondText(request, .method_not_allowed, "405\n");
-                return streamUpdates(io, request, allocator, conn_db, hub);
+                return streamUpdates(io, request, conn_db, hub, arena);
             }
             if (std.mem.eql(u8, path, "/datastar.js")) {
                 return respondAsset(request, datastar_js, "text/javascript; charset=utf-8");
@@ -152,19 +176,19 @@ fn handleRequest(io: Io, request: *std.http.Server.Request, allocator: Allocator
                 std.mem.eql(u8, path, "/users") or
                 std.mem.eql(u8, path, "/index.html"))
             {
-                return respondPage(request, allocator, conn_db);
+                return respondPage(request, arena.allocator(), conn_db);
             }
             return respondText(request, .not_found, "404 Not Found\n");
         },
         .POST => {
             if (std.mem.eql(u8, path, "/users/") or std.mem.eql(u8, path, "/users")) {
-                return handleCreate(request, allocator, conn_db, hub);
+                return handleCreate(request, arena.allocator(), conn_db, hub);
             }
             return respondText(request, .not_found, "404 Not Found\n");
         },
         .DELETE => {
             if (std.mem.startsWith(u8, path, "/users/")) {
-                return handleDelete(request, allocator, conn_db, hub, path["/users/".len..]);
+                return handleDelete(request, arena.allocator(), conn_db, hub, path["/users/".len..]);
             }
             return respondText(request, .not_found, "404 Not Found\n");
         },
@@ -174,11 +198,7 @@ fn handleRequest(io: Io, request: *std.http.Server.Request, allocator: Allocator
 
 // --- Read model ------------------------------------------------------------
 
-fn respondPage(request: *std.http.Server.Request, allocator: Allocator, conn_db: *sqlite.Db) !bool {
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
+fn respondPage(request: *std.http.Server.Request, arena: Allocator, conn_db: *sqlite.Db) !bool {
     const users = try db.allUsers(conn_db, arena);
     const body = try html.renderPageAlloc(arena, users);
 
@@ -194,8 +214,9 @@ fn respondPage(request: *std.http.Server.Request, allocator: Allocator, conn_db:
 
 /// GET /updates — the long-lived SSE read model. Pushes a fat morph of
 /// `#content` on connect and on every subsequent data change, polling the hub
-/// version between sleeps.
-fn streamUpdates(io: Io, request: *std.http.Server.Request, allocator: Allocator, conn_db: *sqlite.Db, hub: *Hub) !bool {
+/// version between sleeps. Each event is rendered into the worker arena, which
+/// is reset after the event is flushed.
+fn streamUpdates(io: Io, request: *std.http.Server.Request, conn_db: *sqlite.Db, hub: *Hub, arena: *std.heap.ArenaAllocator) !bool {
     var stream_buffer: [stream_buffer_len]u8 = undefined;
     var body = try request.respondStreaming(&stream_buffer, .{
         .respond_options = .{
@@ -214,9 +235,9 @@ fn streamUpdates(io: Io, request: *std.http.Server.Request, allocator: Allocator
         if (current != seen) {
             seen = current;
             idle_polls = 0;
-            const event = try renderContentEvent(allocator, conn_db);
-            defer allocator.free(event);
+            const event = try renderContentEvent(arena.allocator(), conn_db);
             pushChunk(&body, event) catch return false;
+            _ = arena.reset(.retain_capacity);
         } else {
             idle_polls += 1;
             if (idle_polls >= heartbeat_polls) {
@@ -240,16 +261,11 @@ fn pushChunk(body: *std.http.BodyWriter, bytes: []const u8) !void {
 }
 
 /// Build one `datastar-patch-elements` SSE event carrying the current
-/// `#content`. The returned slice is owned by `allocator`.
-fn renderContentEvent(allocator: Allocator, conn_db: *sqlite.Db) ![]u8 {
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
+/// `#content`, allocated in `arena` (along with its intermediates).
+fn renderContentEvent(arena: Allocator, conn_db: *sqlite.Db) ![]const u8 {
     const users = try db.allUsers(conn_db, arena);
     const content = try html.renderContentAlloc(arena, users);
-    const event = try datastar.patchElements(arena, content, .{});
-    return allocator.dupe(u8, event);
+    return datastar.patchElements(arena, content, .{});
 }
 
 // --- Commands --------------------------------------------------------------
@@ -258,11 +274,7 @@ fn renderContentEvent(allocator: Allocator, conn_db: *sqlite.Db) ![]u8 {
 /// On any problem, re-render the add dialog (targeted by id) with an error and
 /// leave the entered values in place. On success, publish the change (the
 /// stream re-renders the table), clear the form, and close the dialog.
-fn handleCreate(request: *std.http.Server.Request, allocator: Allocator, conn_db: *sqlite.Db, hub: *Hub) !bool {
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    const arena = arena_state.allocator();
-
+fn handleCreate(request: *std.http.Server.Request, arena: Allocator, conn_db: *sqlite.Db, hub: *Hub) !bool {
     const signals = datastar.readSignals(CreateSignals, arena, request) catch {
         return dialogError(request, arena, "Could not read the submitted form.", null);
     };
@@ -302,7 +314,7 @@ fn handleCreate(request: *std.http.Server.Request, allocator: Allocator, conn_db
 
 /// DELETE /users/{id} — delete a user and publish. The table refresh arrives
 /// over the stream; the confirmation dialog was already closed client-side.
-fn handleDelete(request: *std.http.Server.Request, allocator: Allocator, conn_db: *sqlite.Db, hub: *Hub, id_text: []const u8) !bool {
+fn handleDelete(request: *std.http.Server.Request, arena: Allocator, conn_db: *sqlite.Db, hub: *Hub, id_text: []const u8) !bool {
     const id = std.fmt.parseInt(i64, id_text, 10) catch {
         return respondText(request, .not_found, "404 Not Found\n");
     };
@@ -310,9 +322,7 @@ fn handleDelete(request: *std.http.Server.Request, allocator: Allocator, conn_db
     try db.deleteUser(conn_db, id);
     hub.publish();
 
-    var arena_state = std.heap.ArenaAllocator.init(allocator);
-    defer arena_state.deinit();
-    return sendSse(request, arena_state.allocator(), &.{});
+    return sendSse(request, arena, &.{});
 }
 
 /// Re-render the add dialog (open) with per-field error messages as an element
@@ -385,17 +395,20 @@ fn roundTrip(allocator: Allocator, conn_db: *sqlite.Db, hub: *Hub, raw_request: 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+
     var in = std.Io.Reader.fixed(raw_request);
     var out: std.Io.Writer.Allocating = .init(allocator);
     defer out.deinit();
 
     var http_server = std.http.Server.init(&in, &out.writer);
-    try serve(threaded.io(), &http_server, allocator, conn_db, hub);
+    try serve(threaded.io(), &http_server, conn_db, hub, &arena);
     return out.toOwnedSlice();
 }
 
 fn testDb() !sqlite.Db {
-    var d = try sqlite.Db.open(":memory:");
+    var d = try sqlite.Db.open(std.testing.allocator, ":memory:");
     errdefer d.close();
     try db.init(&d);
     return d;
@@ -444,8 +457,9 @@ test "renderContentEvent emits a patch-elements event for #content" {
     var d = try testDb();
     defer d.close();
 
-    const event = try renderContentEvent(std.testing.allocator, &d);
-    defer std.testing.allocator.free(event);
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+    const event = try renderContentEvent(arena.allocator(), &d);
 
     try std.testing.expect(std.mem.indexOf(u8, event, "datastar-patch-elements") != null);
     try std.testing.expect(std.mem.indexOf(u8, event, "id=\"content\"") != null);

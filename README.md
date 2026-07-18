@@ -157,9 +157,16 @@ sitting behind a proxy.
   remembers the version it last rendered and polls between short sleeps
   (`std.Io.sleep`); polling doubles as a heartbeat that detects dropped clients.
   A production build would swap this for an event/condition to avoid idle wakeups.
-- **Threading.** Each accepted connection is handled on its own detached thread
-  with its own SQLite connection (opened with a busy timeout) to the same file.
-  SQLite is compiled with `SQLITE_THREADSAFE=1`.
+- **Threading.** A fixed pool of worker threads (bounded, reused) serves
+  connections; the kernel load-balances `accept` across them. Each worker owns
+  one SQLite connection and one request arena for its lifetime — no per-request
+  thread or arena creation. A long-lived `/updates` stream occupies its worker,
+  so the pool size bounds concurrent clients.
+- **SQLite.** Each worker's connection is opened `SQLITE_OPEN_NOMUTEX`
+  (multi-thread mode — no per-call mutex, safe because a connection is never
+  shared), in WAL with `synchronous = NORMAL` (concurrent readers, one writer),
+  with a 5s busy timeout. Prepared statements are compiled once and reused per
+  connection (`prepareCached`).
 - **Escaping.** All user-derived values are HTML-escaped in `src/html.zig`, so
   data in the database can never inject markup — including the values embedded
   in Datastar `data-*` attributes on each delete button.

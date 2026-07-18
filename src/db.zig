@@ -38,8 +38,7 @@ pub fn init(db: *sqlite.Db) !void {
 }
 
 fn count(db: *sqlite.Db) !i64 {
-    var stmt = try db.prepare("SELECT COUNT(*) FROM users;");
-    defer stmt.deinit();
+    var stmt = try db.prepareCached("SELECT COUNT(*) FROM users;");
     _ = try stmt.step();
     return stmt.columnInt64(0);
 }
@@ -65,8 +64,7 @@ fn seed(db: *sqlite.Db) !void {
 /// Fetch all users ordered by id. The returned slice and every string it
 /// references are allocated with `allocator`; free them with `freeUsers`.
 pub fn allUsers(db: *sqlite.Db, allocator: Allocator) ![]User {
-    var stmt = try db.prepare("SELECT id, name, email, role FROM users ORDER BY id;");
-    defer stmt.deinit();
+    var stmt = try db.prepareCached("SELECT id, name, email, role FROM users ORDER BY id;");
 
     var list: std.ArrayList(User) = .empty;
     errdefer freeList(&list, allocator);
@@ -86,8 +84,7 @@ pub fn allUsers(db: *sqlite.Db, allocator: Allocator) ![]User {
 /// Insert a new user and return its assigned id. Returns `error.Constraint`
 /// if the email is already taken (the `UNIQUE` constraint).
 pub fn insertUser(db: *sqlite.Db, name: []const u8, email: []const u8, role: []const u8) !i64 {
-    var stmt = try db.prepare("INSERT INTO users (name, email, role) VALUES (?1, ?2, ?3);");
-    defer stmt.deinit();
+    var stmt = try db.prepareCached("INSERT INTO users (name, email, role) VALUES (?1, ?2, ?3);");
     try stmt.bindText(1, name);
     try stmt.bindText(2, email);
     try stmt.bindText(3, role);
@@ -97,8 +94,7 @@ pub fn insertUser(db: *sqlite.Db, name: []const u8, email: []const u8, role: []c
 
 /// Delete the user with the given id. Deleting a non-existent id is a no-op.
 pub fn deleteUser(db: *sqlite.Db, id: i64) !void {
-    var stmt = try db.prepare("DELETE FROM users WHERE id = ?1;");
-    defer stmt.deinit();
+    var stmt = try db.prepareCached("DELETE FROM users WHERE id = ?1;");
     try stmt.bindInt(1, id);
     _ = try stmt.step();
 }
@@ -123,7 +119,7 @@ fn freeList(list: *std.ArrayList(User), allocator: Allocator) void {
 }
 
 test "init seeds a fresh database exactly once" {
-    var db = try sqlite.Db.open(":memory:");
+    var db = try sqlite.Db.open(std.testing.allocator, ":memory:");
     defer db.close();
 
     try init(&db);
@@ -135,7 +131,7 @@ test "init seeds a fresh database exactly once" {
 }
 
 test "allUsers returns seeded rows in id order" {
-    var db = try sqlite.Db.open(":memory:");
+    var db = try sqlite.Db.open(std.testing.allocator, ":memory:");
     defer db.close();
     try init(&db);
 
@@ -151,7 +147,7 @@ test "allUsers returns seeded rows in id order" {
 }
 
 test "insertUser adds a row and deleteUser removes it" {
-    var db = try sqlite.Db.open(":memory:");
+    var db = try sqlite.Db.open(std.testing.allocator, ":memory:");
     defer db.close();
     try init(&db);
 
@@ -167,7 +163,7 @@ test "insertUser adds a row and deleteUser removes it" {
 }
 
 test "insertUser rejects a duplicate email" {
-    var db = try sqlite.Db.open(":memory:");
+    var db = try sqlite.Db.open(std.testing.allocator, ":memory:");
     defer db.close();
     try init(&db);
 
