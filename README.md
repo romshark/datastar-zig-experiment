@@ -82,11 +82,23 @@ Routes:
 | other     | any                           | `405` text                                          |
 
 `POST /users/` reads the submitted fields from Datastar signals (a JSON body)
-and validates them: a blank name/email, an address failing the email check
-(`^[^@\s]+@[^@\s]+\.[^@\s]+$`), or a duplicate email is rejected by re-rendering
-the `#add-dialog` (a targeted element patch) with the error message — the table
-is left untouched. On success the row is inserted, the change is published, and
+and validates each independently: a blank name, a blank/invalid email (checked
+against `^[^@\s]+@[^@\s]+\.[^@\s]+$`), or a duplicate email is rejected by
+re-rendering the `#add-dialog` (a targeted element patch) with each field's
+error shown **directly beneath that field's input** — the table is left
+untouched. On success the row is inserted, the change is published, and
 the dialog is cleared and closed.
+
+## Develop
+
+The HTML lives in [zt](https://github.com/lalinsky/zt) templates
+([`src/templates/users.zt`](src/templates/users.zt)) — a Templ-style language
+that compiles to Zig at build time. zt is vendored and patched for Zig 0.16 in
+[`vendor/zt/`](vendor/zt/) (see [`vendor/zt/PATCH.md`](vendor/zt/PATCH.md)); the
+`.zt` → `.zig` transpile runs automatically as part of every `zig build`, and
+the generated `src/templates/users.zig` is committed.
+
+Edit sources, rerun `zig build run`, and reload the browser.
 
 ## Test
 
@@ -123,8 +135,10 @@ sitting behind a proxy.
 | `src/main.zig`       | Entry point: parse args, open/seed DB, start the server    |
 | `src/server.zig`     | Accept loop, routing, `Hub`, `/updates` SSE, command validation |
 | `src/db.zig`         | `users` schema, first-run seeding, queries, insert, delete |
-| `src/sqlite.zig`     | Thin idiomatic wrapper over the SQLite C API               |
-| `src/html.zig`       | HTML rendering (page + table) with proper escaping         |
+| `src/sqlite.zig`     | Wrapper over the SQLite C API                              |
+| `src/templates/users.zt` | The page + fragments as [zt](https://github.com/lalinsky/zt) templates (source of truth for the HTML) |
+| `src/html.zig`       | Adapter over the generated templates (keeps the `render*` API) |
+| `vendor/zt/`         | Vendored zt transpiler, patched for Zig 0.16 (see `PATCH.md`) |
 | `vendor/sqlite/`     | Vendored SQLite amalgamation (compiled by `build.zig`)     |
 | `vendor/datastar/`   | Vendored Datastar browser runtime (served at `/datastar.js`)|
 

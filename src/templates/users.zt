@@ -1,0 +1,195 @@
+// Users page and its morph-able fragments, as zt templates.
+//
+// Source of truth: build.zig `addTemplates` transpiles this to the generated
+// `users.zig`. Edit this file. zt escapes every `{expr}`, so database values
+// cannot inject markup. Request flow: see the `server` module header.
+
+const db = @import("../db.zig");
+
+// Initial Datastar signals. The literal's `{ }` would parse as an interpolation
+// in an attribute, so it is wrapped in `formatHtml` (which zt treats as
+// pre-escaped HTML) and emitted verbatim.
+const Raw = struct {
+    s: []const u8,
+    pub fn formatHtml(self: Raw, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.writeAll(self.s);
+    }
+};
+const SIGNALS = Raw{ .s = "{name: '', email: '', role: 'member', deleteId: '', deleteName: ''}" };
+
+// The per-row Delete button. It stashes the row's id and name in `data-*`
+// attributes and, on click, copies them into signals and opens the shared
+// confirmation dialog — no server round-trip to *open* the dialog.
+templ DeleteButton(u: db.User) {
+    <button type="button" class="danger" data-user-id={u.id} data-user-name={u.name}
+        data-on:click="$deleteId = el.dataset.userId; $deleteName = el.dataset.userName; document.getElementById('confirm-dialog').showModal()">Delete</button>
+}
+
+// Just the `<table id="users">` element.
+templ Table(users: []const db.User) {
+    <table id="users">
+        <caption>{users.len} user(s), live-updated over SSE</caption>
+        <thead>
+            <tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th></th></tr>
+        </thead>
+        <tbody>
+            for (users) |u| {
+                <tr>
+                    <td>{u.id}</td>
+                    <td>{u.name}</td>
+                    <td>{u.email}</td>
+                    <td class="role">{u.role}</td>
+                    <td>
+                        @DeleteButton(u)
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+// The `#content` region: the fat-morph target pushed by the `/updates` stream.
+pub templ Content(users: []const db.User) {
+    <main id="content">
+        @Table(users)
+    </main>
+}
+
+// Shared inner form for the add-user dialog. Each field's error, when present,
+// is shown directly beneath that field's input.
+templ AddForm(name_err: ?[]const u8, email_err: ?[]const u8) {
+    <form method="dialog">
+        <h2>Add user</h2>
+        <label>Name<input data-bind:name placeholder="Jane Doe" /></label>
+        if (name_err) |message| {
+            <p class="field-error">{message}</p>
+        }
+        <label>Email<input type="email" data-bind:email placeholder="jane@example.com" /></label>
+        if (email_err) |message| {
+            <p class="field-error">{message}</p>
+        }
+        <label>Role
+            <select data-bind:role>
+                <option value="member">member</option>
+                <option value="admin">admin</option>
+            </select>
+        </label>
+        <menu>
+            <button value="cancel">Cancel</button>
+            <button type="button" class="primary" data-on:click="@post('/users/')">Save</button>
+        </menu>
+    </form>
+}
+
+// The add-user dialog. `open` controls whether it renders in the open state
+// (used when re-rendering after a validation error so the morph keeps it up).
+// zt cannot conditionally emit a bare `open` attribute, so we branch on the
+// whole element and share the form body via `@AddForm`.
+pub templ AddDialog(open: bool, name_err: ?[]const u8, email_err: ?[]const u8) {
+    if (open) {
+        <dialog id="add-dialog" open>
+            @AddForm(name_err, email_err)
+        </dialog>
+    } else {
+        <dialog id="add-dialog">
+            @AddForm(name_err, email_err)
+        </dialog>
+    }
+}
+
+// The full HTML document (the shell that boots the SSE stream). The <style> and
+// <script> blocks are raw-text elements in zt, so their literal `{ }` are left
+// untouched.
+pub templ Page(users: []const db.User) {
+    <!doctype html>
+    <html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Users</title>
+        <script type="module" src="/datastar.js"></script>
+        <style>
+    /* Colors are defined once with light-dark(): the browser picks the
+       light or dark value from the used `color-scheme`, which follows
+       the OS setting by default and can be overridden per-element. */
+    :root {
+      color-scheme: light dark;
+      --bg:            light-dark(#ffffff, #14181f);
+      --fg:            light-dark(#1a1a1a, #e7e9ee);
+      --muted:         light-dark(#666666, #9aa4b2);
+      --border:        light-dark(#dddddd, #2b3240);
+      --border-strong: light-dark(#999999, #3a4150);
+      --row-alt:       light-dark(#f6f6f6, #1b2029);
+      --btn-bg:        light-dark(#ffffff, #1b2029);
+      --btn-border:    light-dark(#bbbbbb, #3a4150);
+      --accent:        light-dark(#1a56db, #4f83ff);
+      --danger:        light-dark(#d1495b, #ff6b81);
+      --surface:       light-dark(#ffffff, #1b2029);
+      --shadow:        light-dark(rgba(0,0,0,.2), rgba(0,0,0,.6));
+      --backdrop:      light-dark(rgba(0,0,0,.35), rgba(0,0,0,.6));
+    }
+    /* The runtime listener (script at the end of <body>) sets
+       data-theme to force a specific scheme; without it, the OS wins. */
+    :root[data-theme="light"] { color-scheme: light; }
+    :root[data-theme="dark"]  { color-scheme: dark; }
+
+    body { font-family: system-ui, sans-serif; margin: 2rem; background: var(--bg); color: var(--fg); }
+    h1 { font-size: 1.5rem; }
+    table { border-collapse: collapse; width: 100%; max-width: 760px; }
+    caption { text-align: left; color: var(--muted); margin-bottom: .5rem; }
+    th, td { text-align: left; padding: .5rem .75rem; border-bottom: 1px solid var(--border); }
+    thead th { border-bottom: 2px solid var(--border-strong); }
+    tbody tr:nth-child(even) { background: var(--row-alt); }
+    .role { font-size: .8rem; text-transform: uppercase; letter-spacing: .03em; color: var(--muted); }
+    button { font: inherit; padding: .35rem .7rem; border-radius: 6px; border: 1px solid var(--btn-border); background: var(--btn-bg); color: var(--fg); cursor: pointer; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.danger { border-color: var(--danger); color: var(--danger); }
+    .toolbar { margin: 1rem 0; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
+    .theme-tag { color: var(--muted); font-size: .85rem; }
+    dialog { border: none; border-radius: 10px; padding: 1.25rem 1.5rem; background: var(--surface); color: var(--fg); box-shadow: 0 10px 40px var(--shadow); }
+    dialog::backdrop { background: var(--backdrop); }
+    dialog h2 { margin-top: 0; }
+    dialog label { display: block; margin: .6rem 0; }
+    dialog input, dialog select { font: inherit; padding: .3rem; width: 100%; box-sizing: border-box; }
+    dialog menu { display: flex; gap: .5rem; justify-content: flex-end; padding: 0; margin: 1rem 0 0; }
+    .field-error { color: var(--danger); font-weight: 600; font-size: .85rem; margin: -.35rem 0 .4rem; }
+        </style>
+    </head>
+    <body data-signals={SIGNALS} data-init="@get('/updates')">
+        <h1>Users</h1>
+        <div class="toolbar">
+            <button class="primary" data-on:click="document.getElementById('add-dialog').showModal()">Add user</button>
+            <span class="theme-tag">Theme: <b id="theme-name">…</b> (follows your system)</span>
+        </div>
+        @Content(users)
+        @AddDialog(false, null, null)
+        <dialog id="confirm-dialog">
+            <form method="dialog">
+                <h2>Delete user</h2>
+                <p>Really delete <strong data-text="$deleteName"></strong>?</p>
+                <menu>
+                    <button value="cancel">Cancel</button>
+                    <button type="button" class="danger" data-on:click="@delete('/users/' + $deleteId); document.getElementById('confirm-dialog').close()">Delete</button>
+                </menu>
+            </form>
+        </dialog>
+        <script>
+    // CSS already re-themes via `color-scheme` + light-dark(). This listener
+    // adds runtime reaction: it mirrors the current mode into `data-theme` (an
+    // override hook), updates the indicator, and emits a `themechange` event.
+    (function () {
+      const query = window.matchMedia("(prefers-color-scheme: dark)");
+      function applyTheme() {
+        const mode = query.matches ? "dark" : "light";
+        document.documentElement.dataset.theme = mode;
+        const label = document.getElementById("theme-name");
+        if (label) label.textContent = mode;
+        document.dispatchEvent(new CustomEvent("themechange", { detail: { mode } }));
+      }
+      query.addEventListener("change", applyTheme);
+      applyTheme();
+    })();
+        </script>
+    </body>
+    </html>
+}

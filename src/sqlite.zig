@@ -1,9 +1,6 @@
-//! A thin, idiomatic Zig wrapper over the vendored SQLite C library.
-//!
-//! It exposes just enough of the API for this example: opening a database,
-//! executing statements, and iterating prepared-statement result rows. Errors
-//! from the C API are translated into a Zig error set; the human-readable
-//! message stays reachable through `Db.errmsg`.
+//! Zig wrapper over the vendored SQLite C API: open a database, execute
+//! statements, iterate result rows. C result codes map to `Error`; the message
+//! stays reachable via `Db.errmsg`.
 
 const std = @import("std");
 

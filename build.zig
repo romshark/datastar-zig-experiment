@@ -1,17 +1,24 @@
 const std = @import("std");
+const zt = @import("zt");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Datastar SDK: produces the SSE payloads (patch elements/signals) and
-    // parses Datastar request signals. Fetched via the package manager.
+    // Datastar SDK: builds SSE payloads and parses request signals.
     const datastar = b.dependency("datastar", .{ .target = target, .optimize = optimize });
     const datastar_mod = datastar.module("datastar");
 
-    // The server executable. Its root module bundles the vendored SQLite
-    // amalgamation so the build is fully self-contained: no system SQLite
-    // (or its headers) is required on the host.
+    // zt templating (vendored; see vendor/zt/PATCH.md). `addTemplates` transpiles
+    // src/templates/*.zt to sibling *.zig; the generated code imports `zt_mod`.
+    const zt_dep = b.dependency("zt", .{ .target = target, .optimize = optimize });
+    const zt_mod = zt_dep.module("zt");
+    const templates = zt.addTemplates(b, zt_dep, &.{
+        b.path("src/templates/users.zt"),
+    });
+
+    // Root module bundles the vendored SQLite amalgamation, so no system SQLite
+    // or headers are required.
     const exe_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
@@ -19,12 +26,15 @@ pub fn build(b: *std.Build) void {
     });
     linkSqlite(b, exe_mod);
     exe_mod.addImport("datastar", datastar_mod);
+    exe_mod.addImport("zt", zt_mod);
     embedDatastarRuntime(b, exe_mod);
 
     const exe = b.addExecutable(.{
         .name = "zigvibe",
         .root_module = exe_mod,
     });
+    // Templates must regenerate before anything that imports them compiles.
+    exe.step.dependOn(templates);
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -42,9 +52,11 @@ pub fn build(b: *std.Build) void {
     });
     linkSqlite(b, test_mod);
     test_mod.addImport("datastar", datastar_mod);
+    test_mod.addImport("zt", zt_mod);
     embedDatastarRuntime(b, test_mod);
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
+    unit_tests.step.dependOn(templates);
     const run_unit_tests = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);

@@ -6,6 +6,8 @@
             .url = "git+https://github.com/starfederation/datastar-zig#c03f983d8b5f5796876f9428cd9bd28b8fe3daaf",
             .hash = "datastar_sdk_zig-0.1.0-IRNEdhNOAAAqlQb7oJWLU9KnorucKkrZ3H3UFurQzUxs",
         },
+        // Vendored; patched for Zig 0.16 (vendor/zt/PATCH.md).
+        .zt = .{ .path = "vendor/zt" },
     },
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0xb2dc36c9218b5fbe,

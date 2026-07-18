@@ -1,7 +1,5 @@
-//! Application data layer: the `users` table, first-run seeding, and queries.
-//!
-//! This sits on top of the low-level `sqlite` wrapper and speaks in terms of
-//! the `User` domain type rather than raw columns.
+//! Data layer for the `users` table: schema, first-run seeding, queries,
+//! insert, delete. Built on the `sqlite` wrapper; returns `User` values.
 
 const std = @import("std");
 const sqlite = @import("sqlite.zig");
@@ -32,9 +30,8 @@ const seed_users = [_]struct { name: []const u8, email: []const u8, role: []cons
     .{ .name = "Dennis Ritchie", .email = "dennis@example.com", .role = "member" },
 };
 
-/// Ensure the schema exists and, if the `users` table is empty, populate it
-/// with the built-in sample rows. Safe to call on every startup: an existing,
-/// non-empty database is left untouched.
+/// Create the schema, then seed sample rows if the table is empty. Idempotent:
+/// a non-empty database is left untouched.
 pub fn init(db: *sqlite.Db) !void {
     try db.exec(schema);
     if (try count(db) == 0) try seed(db);
@@ -106,7 +103,7 @@ pub fn deleteUser(db: *sqlite.Db, id: i64) !void {
     _ = try stmt.step();
 }
 
-/// Free a slice previously returned by `allUsers`.
+/// Free a slice returned by `allUsers`.
 pub fn freeUsers(users: []const User, allocator: Allocator) void {
     for (users) |u| {
         allocator.free(u.name);
@@ -132,7 +129,7 @@ test "init seeds a fresh database exactly once" {
     try init(&db);
     try std.testing.expectEqual(@as(i64, seed_users.len), try count(&db));
 
-    // A second init must not duplicate the seed data.
+    // Second init must not re-seed.
     try init(&db);
     try std.testing.expectEqual(@as(i64, seed_users.len), try count(&db));
 }
@@ -164,7 +161,7 @@ test "insertUser adds a row and deleteUser removes it" {
     try deleteUser(&db, id);
     try std.testing.expectEqual(@as(i64, seed_users.len), try count(&db));
 
-    // Deleting again is a harmless no-op.
+    // Deleting again is a no-op.
     try deleteUser(&db, id);
     try std.testing.expectEqual(@as(i64, seed_users.len), try count(&db));
 }

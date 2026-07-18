@@ -39,11 +39,9 @@ const CreateSignals = struct {
     role: []const u8 = "member",
 };
 
-/// Broadcasts "the data changed" to every open `/updates` stream via a
-/// monotonic version counter. Each stream remembers the version it last
-/// rendered and polls this counter, re-rendering when it moves. A lock-free
-/// atomic keeps the coordination trivial; streams poll rather than block
-/// because it also gives them a natural heartbeat and disconnect detection.
+/// Monotonic version counter broadcast to every open `/updates` stream. A
+/// stream stores the version it last rendered and polls this counter; polling
+/// also drives the stream heartbeat and disconnect check.
 pub const Hub = struct {
     version: std.atomic.Value(u64) = .{ .raw = 1 },
 
@@ -223,12 +221,11 @@ fn streamUpdates(io: Io, request: *std.http.Server.Request, allocator: Allocator
             idle_polls += 1;
             if (idle_polls >= heartbeat_polls) {
                 idle_polls = 0;
-                // A comment line keeps the connection warm and surfaces a
-                // dropped client as a write error.
+                // Comment line surfaces a dropped client as a write error.
                 pushChunk(&body, ": keep-alive\n\n") catch return false;
             }
         }
-        // Cancellation (shutdown) ends the stream cleanly.
+        // Cancellation (shutdown) ends the stream.
         std.Io.sleep(io, poll_interval, .awake) catch return true;
     }
 }
@@ -267,20 +264,28 @@ fn handleCreate(request: *std.http.Server.Request, allocator: Allocator, conn_db
     const arena = arena_state.allocator();
 
     const signals = datastar.readSignals(CreateSignals, arena, request) catch {
-        return dialogError(request, arena, "Could not read the submitted form.");
+        return dialogError(request, arena, "Could not read the submitted form.", null);
     };
 
     const name = std.mem.trim(u8, signals.name, " \t\r\n");
     const email = std.mem.trim(u8, signals.email, " \t\r\n");
-    if (name.len == 0 or email.len == 0) {
-        return dialogError(request, arena, "Name and email are both required.");
+
+    // Validate each field independently so every offending field shows its own
+    // message directly beneath it.
+    var name_err: ?[]const u8 = null;
+    var email_err: ?[]const u8 = null;
+    if (name.len == 0) name_err = "Name is required.";
+    if (email.len == 0) {
+        email_err = "Email is required.";
+    } else if (!isValidEmail(email)) {
+        email_err = "Please enter a valid email address.";
     }
-    if (!isValidEmail(email)) {
-        return dialogError(request, arena, "Please enter a valid email address.");
+    if (name_err != null or email_err != null) {
+        return dialogError(request, arena, name_err, email_err);
     }
 
     _ = db.insertUser(conn_db, name, email, signals.role) catch |err| switch (err) {
-        error.Constraint => return dialogError(request, arena, "That email is already in use."),
+        error.Constraint => return dialogError(request, arena, null, "That email is already in use."),
         else => return err,
     };
 
@@ -289,7 +294,7 @@ fn handleCreate(request: *std.http.Server.Request, allocator: Allocator, conn_db
     // Success: the stream will refresh the table; here we just reset and close
     // the dialog for the client that submitted it.
     return sendSse(request, arena, &.{
-        try datastar.patchElements(arena, try html.renderAddDialogAlloc(arena, true, null), .{}),
+        try datastar.patchElements(arena, try html.renderAddDialogAlloc(arena, true, null, null), .{}),
         try datastar.patchSignals(arena, .{ .name = "", .email = "", .role = "member" }, .{}),
         try datastar.executeScript(arena, "document.getElementById('add-dialog').close()", .{}),
     });
@@ -310,10 +315,10 @@ fn handleDelete(request: *std.http.Server.Request, allocator: Allocator, conn_db
     return sendSse(request, arena_state.allocator(), &.{});
 }
 
-/// Re-render the add dialog (open, with `message`) as an element patch that
-/// targets `#add-dialog` by id.
-fn dialogError(request: *std.http.Server.Request, arena: Allocator, message: []const u8) !bool {
-    const dialog = try html.renderAddDialogAlloc(arena, true, message);
+/// Re-render the add dialog (open) with per-field error messages as an element
+/// patch that targets `#add-dialog` by id.
+fn dialogError(request: *std.http.Server.Request, arena: Allocator, name_err: ?[]const u8, email_err: ?[]const u8) !bool {
+    const dialog = try html.renderAddDialogAlloc(arena, true, name_err, email_err);
     return sendSse(request, arena, &.{try datastar.patchElements(arena, dialog, .{})});
 }
 
@@ -503,6 +508,29 @@ test "POST /users/ with an empty name is rejected" {
 
     try std.testing.expectEqual(@as(usize, 5), try userCount(&d));
     try std.testing.expect(std.mem.indexOf(u8, response, "required") != null);
+}
+
+test "POST /users/ reports name and email errors independently" {
+    var d = try testDb();
+    defer d.close();
+    var hub: Hub = .{};
+
+    // Empty name AND invalid email: both field errors must be present, and the
+    // name error must appear before the email input (i.e. under the name field).
+    const body = "{\"name\":\"\",\"email\":\"nope\",\"role\":\"member\"}";
+    const request = std.fmt.comptimePrint(
+        "POST /users/ HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n{s}",
+        .{ body.len, body },
+    );
+    const response = try roundTrip(std.testing.allocator, &d, &hub, request);
+    defer std.testing.allocator.free(response);
+
+    const name_err = std.mem.indexOf(u8, response, "Name is required.").?;
+    const email_input = std.mem.indexOf(u8, response, "data-bind:email").?;
+    const email_err = std.mem.indexOf(u8, response, "valid email address").?;
+    try std.testing.expect(name_err < email_input);
+    try std.testing.expect(email_input < email_err);
+    try std.testing.expectEqual(@as(usize, 5), try userCount(&d));
 }
 
 test "POST /users/ with a duplicate email is rejected" {
