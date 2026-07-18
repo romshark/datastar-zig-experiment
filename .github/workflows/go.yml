@@ -59,3 +59,15 @@ jobs:
         with:
           version: v2.12.2
           working-directory: go
+
+  # govulncheck reports known vulnerabilities in the module dependencies and,
+  # via static analysis, whether the vulnerable symbols are actually reached.
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      # The action checks out the repo itself (repo-checkout defaults to true).
+      - uses: golang/govulncheck-action@v1
+        with:
+          go-version-file: go/go.mod
+          work-dir: go
