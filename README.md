@@ -1,5 +1,8 @@
 # zigvibe
 
+**DISCLAIMER**: This is just a Zig vibe-coding experiment. The code is, with a very high
+probability, a pile of 💩, so keep that in mind!
+
 A small example web server in **Zig 0.16** that renders a table of users as
 HTML, backed by **SQLite**, with add/delete driven by
 [**Datastar**](https://data-star.dev). The database is created and seeded with
