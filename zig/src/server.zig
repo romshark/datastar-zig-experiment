@@ -303,12 +303,18 @@ fn handleCreate(request: *std.http.Server.Request, arena: Allocator, conn_db: *s
 
     hub.publish();
 
-    // Success: the stream will refresh the table; here we just reset and close
-    // the dialog for the client that submitted it.
+    // Success: the stream will refresh the table; here we just reset the form,
+    // clear any field errors, and close the dialog (addOpen=false drives
+    // data-effect to close the modal). The dialog element is never patched.
     return sendSse(request, arena, &.{
-        try datastar.patchElements(arena, try html.renderAddDialogAlloc(arena, true, null, null), .{}),
-        try datastar.patchSignals(arena, .{ .name = "", .email = "", .role = "member" }, .{}),
-        try datastar.executeScript(arena, "document.getElementById('add-dialog').close()", .{}),
+        try datastar.patchSignals(arena, .{
+            .name = "",
+            .email = "",
+            .role = "member",
+            .nameError = "",
+            .emailError = "",
+            .addOpen = false,
+        }, .{}),
     });
 }
 
@@ -325,11 +331,17 @@ fn handleDelete(request: *std.http.Server.Request, arena: Allocator, conn_db: *s
     return sendSse(request, arena, &.{});
 }
 
-/// Re-render the add dialog (open) with per-field error messages as an element
-/// patch that targets `#add-dialog` by id.
+/// Report per-field validation messages by patching the `$nameError` /
+/// `$emailError` signals. The dialog element is untouched, so it stays open
+/// (data-show/data-text surface the messages beneath their inputs). Both fields
+/// are always sent so an empty string clears a stale message.
 fn dialogError(request: *std.http.Server.Request, arena: Allocator, name_err: ?[]const u8, email_err: ?[]const u8) !bool {
-    const dialog = try html.renderAddDialogAlloc(arena, true, name_err, email_err);
-    return sendSse(request, arena, &.{try datastar.patchElements(arena, dialog, .{})});
+    return sendSse(request, arena, &.{
+        try datastar.patchSignals(arena, .{
+            .nameError = name_err orelse "",
+            .emailError = email_err orelse "",
+        }, .{}),
+    });
 }
 
 /// A basic email check, equivalent to the regex `^[^@\s]+@[^@\s]+\.[^@\s]+$`:
@@ -481,13 +493,14 @@ test "POST /users/ creates a user, publishes, and closes the dialog" {
 
     try std.testing.expectEqual(@as(usize, 6), try userCount(&d));
     try std.testing.expectEqual(@as(u64, 2), hub.current()); // published once
-    // The command response drives dialog UX (close), not the table.
-    try std.testing.expect(std.mem.indexOf(u8, response, "add-dialog").? != 0);
-    try std.testing.expect(std.mem.indexOf(u8, response, "close()") != null);
+    // The command response resets the form and clears $addOpen to close the
+    // dialog; it never carries the table.
+    try std.testing.expect(std.mem.indexOf(u8, response, "datastar-patch-signals") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "addOpen") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "Barbara Liskov") == null);
 }
 
-test "POST /users/ with an invalid email re-renders the dialog with an error" {
+test "POST /users/ with an invalid email reports the error via signals" {
     var d = try testDb();
     defer d.close();
     var hub: Hub = .{};
@@ -502,8 +515,8 @@ test "POST /users/ with an invalid email re-renders the dialog with an error" {
 
     try std.testing.expectEqual(@as(usize, 5), try userCount(&d)); // nothing added
     try std.testing.expectEqual(@as(u64, 1), hub.current()); // not published
-    try std.testing.expect(std.mem.indexOf(u8, response, "datastar-patch-elements") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response, "add-dialog") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "datastar-patch-signals") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "emailError") != null);
     try std.testing.expect(std.mem.indexOf(u8, response, "valid email") != null);
 }
 
@@ -529,8 +542,8 @@ test "POST /users/ reports name and email errors independently" {
     defer d.close();
     var hub: Hub = .{};
 
-    // Empty name AND invalid email: both field errors must be present, and the
-    // name error must appear before the email input (i.e. under the name field).
+    // Empty name AND invalid email: both field-error signals must be set with
+    // their own message (the template places each beneath its own input).
     const body = "{\"name\":\"\",\"email\":\"nope\",\"role\":\"member\"}";
     const request = std.fmt.comptimePrint(
         "POST /users/ HTTP/1.1\r\nHost: x\r\nContent-Length: {d}\r\n\r\n{s}",
@@ -539,11 +552,8 @@ test "POST /users/ reports name and email errors independently" {
     const response = try roundTrip(std.testing.allocator, &d, &hub, request);
     defer std.testing.allocator.free(response);
 
-    const name_err = std.mem.indexOf(u8, response, "Name is required.").?;
-    const email_input = std.mem.indexOf(u8, response, "data-bind:email").?;
-    const email_err = std.mem.indexOf(u8, response, "valid email address").?;
-    try std.testing.expect(name_err < email_input);
-    try std.testing.expect(email_input < email_err);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"nameError\":\"Name is required.\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response, "\"emailError\":\"Please enter a valid email address.\"") != null);
     try std.testing.expectEqual(@as(usize, 5), try userCount(&d));
 }
 

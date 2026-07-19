@@ -10,7 +10,7 @@ import "strconv"
 
 // initialSignals is the initial Datastar signal state, emitted verbatim into
 // the body's data-signals attribute.
-const initialSignals = "{name: '', email: '', role: 'member', deleteId: '', deleteName: ''}"
+const initialSignals = "{name: '', email: '', role: 'member', deleteId: '', deleteName: '', addOpen: false, nameError: '', emailError: ''}"
 
 // DeleteButton is the per-row Delete button. It stashes the row's id and name
 // in data-* attributes and, on click, copies them into signals and opens the
@@ -56,19 +56,17 @@ templ Content(users []User) {
 	</main>
 }
 
-// AddForm is the shared inner form for the add-user dialog. Each field's error,
-// when present (non-empty), is shown directly beneath that field's input.
-templ AddForm(nameErr, emailErr string) {
+// AddForm is the shared inner form for the add-user dialog. Field errors are
+// driven by the $nameError / $emailError signals (data-text fills the message,
+// data-show hides the paragraph while empty), so the server reports validation
+// failures by patching signals rather than re-rendering the dialog.
+templ AddForm() {
 	<form method="dialog">
 		<h2>Add user</h2>
 		<label>Name<input data-bind:name placeholder="Jane Doe"/></label>
-		if nameErr != "" {
-			<p class="field-error">{ nameErr }</p>
-		}
+		<p class="field-error" data-show="$nameError" data-text="$nameError"></p>
 		<label>Email<input type="email" data-bind:email placeholder="jane@example.com"/></label>
-		if emailErr != "" {
-			<p class="field-error">{ emailErr }</p>
-		}
+		<p class="field-error" data-show="$emailError" data-text="$emailError"></p>
 		<label>
 			Role
 			<select data-bind:role>
@@ -83,11 +81,16 @@ templ AddForm(nameErr, emailErr string) {
 	</form>
 }
 
-// AddDialog is the add-user dialog. open renders it in the open state (used when
-// re-rendering after a validation error so the morph keeps it up).
-templ AddDialog(open bool, nameErr, emailErr string) {
-	<dialog id="add-dialog" open?={ open }>
-		@AddForm(nameErr, emailErr)
+// AddDialog is the add-user dialog. Its open state is driven by the $addOpen
+// signal: data-effect opens the modal when the signal is set and closes it when
+// cleared (el.open guards against calling showModal on an already-open dialog,
+// which throws). data-on:close keeps the signal in sync when the user dismisses
+// the dialog with Escape or Cancel, and clears any field errors. The dialog is
+// never re-rendered by the server, so its open state is not disturbed; errors
+// arrive as signal patches (see AddForm).
+templ AddDialog() {
+	<dialog id="add-dialog" data-effect="$addOpen ? (el.open || el.showModal()) : el.close()" data-on:close="$addOpen = false; $nameError = ''; $emailError = ''">
+		@AddForm()
 	</dialog>
 }
 
@@ -100,17 +103,17 @@ templ Page(users []User) {
 			<meta charset="utf-8"/>
 			<meta name="viewport" content="width=device-width, initial-scale=1"/>
 			<title>Users</title>
-			<script type="module" src="/datastar.js"></script>
-			<link rel="stylesheet" href="/app.css"/>
+			<script type="module" src="/static/datastar.js"></script>
+			<link rel="stylesheet" href="/static/app.css"/>
 		</head>
 		<body data-signals={ initialSignals } data-init="@get('/updates')">
 			<h1>Users</h1>
 			<div class="toolbar">
-				<button class="primary" data-on:click="document.getElementById('add-dialog').showModal()">Add user</button>
+				<button class="primary" data-on:click="$addOpen = true">Add user</button>
 				<span class="theme-tag">Theme: <b id="theme-name">…</b> (follows your system)</span>
 			</div>
 			@Content(users)
-			@AddDialog(false, "", "")
+			@AddDialog()
 			<dialog id="confirm-dialog">
 				<form method="dialog">
 					<h2>Delete user</h2>
@@ -121,7 +124,7 @@ templ Page(users []User) {
 					</menu>
 				</form>
 			</dialog>
-			<script src="/app.js"></script>
+			<script src="/static/app.js"></script>
 		</body>
 	</html>
 }

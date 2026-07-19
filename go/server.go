@@ -65,8 +65,8 @@ func (h *Hub) subscribe() chan struct{} {
 
 func (h *Hub) unsubscribe(ch chan struct{}) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
 	delete(h.subs, ch)
-	h.mu.Unlock()
 }
 
 // publish signals that the data changed.
@@ -98,9 +98,7 @@ func (s *server) routes() http.Handler {
 
 	mux.HandleFunc("GET /updates", s.handleUpdates)
 
-	mux.HandleFunc("GET /datastar.js", asset("datastar.js", "text/javascript; charset=utf-8"))
-	mux.HandleFunc("GET /app.css", asset("app.css", "text/css; charset=utf-8"))
-	mux.HandleFunc("GET /app.js", asset("app.js", "text/javascript; charset=utf-8"))
+	mux.Handle("GET /static/", staticHandler())
 
 	mux.HandleFunc("POST /users/{$}", s.handleCreate)
 	mux.HandleFunc("POST /users", s.handleCreate)
@@ -221,22 +219,31 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	s.hub.publish()
 
-	// Success: the stream refreshes the table; here we just reset and close the
-	// dialog for the client that submitted it. The dialog is re-rendered in the
-	// open state (clearing any prior error) and then closed via script, because
-	// a morph that drops the `open` attribute does not dismiss a modal dialog.
+	// Success: the stream refreshes the table; here we just reset the form,
+	// clear any field errors, and close the dialog (addOpen=false drives
+	// data-effect to close the modal). The dialog element is never patched.
 	sse := datastar.NewSSE(w, r)
-	if err := sse.PatchElementTempl(AddDialog(true, "", "")); err != nil {
-		log.Printf("create: reset dialog: %v", err)
-		return
-	}
-	if err := sse.MarshalAndPatchSignals(createSignals{Name: "", Email: "", Role: "member"}); err != nil {
+	if err := sse.MarshalAndPatchSignals(resetSignals{Role: "member"}); err != nil {
 		log.Printf("create: reset signals: %v", err)
-		return
 	}
-	if err := sse.ExecuteScript("document.getElementById('add-dialog').close()"); err != nil {
-		log.Printf("create: close dialog: %v", err)
-	}
+}
+
+// resetSignals clears the add-form fields and field errors and closes the dialog
+// (addOpen=false) after a successful create.
+type resetSignals struct {
+	Name       string `json:"name"`
+	Email      string `json:"email"`
+	Role       string `json:"role"`
+	NameError  string `json:"nameError"`
+	EmailError string `json:"emailError"`
+	AddOpen    bool   `json:"addOpen"`
+}
+
+// fieldErrors reports per-field validation messages to the open dialog. Both
+// fields are always sent (empty clears a stale message on that field).
+type fieldErrors struct {
+	NameError  string `json:"nameError"`
+	EmailError string `json:"emailError"`
 }
 
 // handleDelete deletes a user and publishes. The table refresh arrives over the
@@ -258,11 +265,12 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	datastar.NewSSE(w, r)
 }
 
-// dialogError re-renders the add dialog (open) with per-field error messages as
-// an element patch that targets #add-dialog by id.
+// dialogError reports per-field validation messages by patching the
+// $nameError / $emailError signals. The dialog element is untouched, so it stays
+// open (data-show/data-text surface the messages beneath their inputs).
 func (s *server) dialogError(w http.ResponseWriter, r *http.Request, nameErr, emailErr string) {
 	sse := datastar.NewSSE(w, r)
-	if err := sse.PatchElementTempl(AddDialog(true, nameErr, emailErr)); err != nil {
+	if err := sse.MarshalAndPatchSignals(fieldErrors{NameError: nameErr, EmailError: emailErr}); err != nil {
 		log.Printf("dialog error patch: %v", err)
 	}
 }
@@ -283,7 +291,7 @@ func isValidEmail(email string) bool {
 	if dot <= 0 || dot == len(domain)-1 {
 		return false // no dot, or dot at start/end of domain
 	}
-	for i := 0; i < len(email); i++ {
+	for i := range len(email) {
 		if email[i] <= ' ' {
 			return false // no spaces or control characters
 		}
@@ -293,17 +301,12 @@ func isValidEmail(email string) bool {
 
 // --- Response helpers ------------------------------------------------------
 
-// asset serves an embedded static file with a long cache lifetime.
-func asset(name, contentType string) http.HandlerFunc {
-	data, err := staticFS.ReadFile("static/" + name)
-	if err != nil {
-		panic(err) // embedded at build time; absence is a programmer error
-	}
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", contentType)
+// staticHandler serves the embedded static/ directory under /static/ with a
+// long cache lifetime. Content types are inferred from file extensions.
+func staticHandler() http.Handler {
+	files := http.FileServerFS(staticFS)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "max-age=3600")
-		if _, err := w.Write(data); err != nil {
-			log.Printf("serve %s: %v", name, err)
-		}
-	}
+		files.ServeHTTP(w, r)
+	})
 }

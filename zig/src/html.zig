@@ -30,13 +30,6 @@ pub fn renderContent(w: *Writer, users: []const db.User) Writer.Error!void {
     try templates.Content.render(.{users}, w);
 }
 
-/// The add-user dialog. `open` renders it in the open state (used when
-/// re-rendering after a validation error so the morph keeps it up). Each field
-/// error, when present, is shown directly beneath that field's input.
-pub fn renderAddDialog(w: *Writer, open: bool, name_err: ?[]const u8, email_err: ?[]const u8) Writer.Error!void {
-    try templates.AddDialog.render(.{ open, name_err, email_err }, w);
-}
-
 /// Render the full HTML document (the shell that boots the SSE stream).
 pub fn renderPage(w: *Writer, users: []const db.User) Writer.Error!void {
     try templates.Page.render(.{users}, w);
@@ -62,16 +55,6 @@ pub fn renderContentAlloc(allocator: Allocator, users: []const db.User) ![]u8 {
     return aw.toOwnedSlice();
 }
 
-/// Render the add-user dialog into a freshly allocated buffer.
-pub fn renderAddDialogAlloc(allocator: Allocator, open: bool, name_err: ?[]const u8, email_err: ?[]const u8) ![]u8 {
-    var aw: Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    renderAddDialog(&aw.writer, open, name_err, email_err) catch |e| switch (e) {
-        error.WriteFailed => return error.OutOfMemory,
-    };
-    return aw.toOwnedSlice();
-}
-
 test "escape encodes markup-significant characters" {
     var buf: [128]u8 = undefined;
     var w = Writer.fixed(&buf);
@@ -92,21 +75,27 @@ test "renderContent wraps the escaped table with the morph target id" {
     try std.testing.expect(std.mem.indexOf(u8, content, "Ada &lt;script&gt;") != null);
 }
 
-test "renderAddDialog shows per-field errors and open state only when asked" {
-    const clean = try renderAddDialogAlloc(std.testing.allocator, false, null, null);
-    defer std.testing.allocator.free(clean);
-    try std.testing.expect(std.mem.indexOf(u8, clean, "field-error") == null);
-    try std.testing.expect(std.mem.indexOf(u8, clean, "<dialog id=\"add-dialog\">") != null);
+test "add dialog is signal-driven with per-field error slots under each input" {
+    const users = [_]db.User{
+        .{ .id = 1, .name = "Ada", .email = "a@x.com", .role = "admin" },
+    };
+    const page = try renderPageAlloc(std.testing.allocator, &users);
+    defer std.testing.allocator.free(page);
 
-    // A name error appears before the email input; an email error after it.
-    const errored = try renderAddDialogAlloc(std.testing.allocator, true, "Name required", "Bad email");
-    defer std.testing.allocator.free(errored);
-    try std.testing.expect(std.mem.indexOf(u8, errored, "<dialog id=\"add-dialog\" open>") != null);
-    const name_pos = std.mem.indexOf(u8, errored, "Name required").?;
-    const email_input_pos = std.mem.indexOf(u8, errored, "data-bind:email").?;
-    const email_err_pos = std.mem.indexOf(u8, errored, "Bad email").?;
-    try std.testing.expect(name_pos < email_input_pos);
-    try std.testing.expect(email_input_pos < email_err_pos);
+    // Open state is driven by the $addOpen signal via data-effect, not an attribute.
+    try std.testing.expect(std.mem.indexOf(u8, page, "id=\"add-dialog\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "data-effect=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, page, "<dialog id=\"add-dialog\" open") == null);
+
+    // The name error slot sits between the name and email inputs; the email
+    // error slot after the email input. Both are bound to their signals.
+    const name_input = std.mem.indexOf(u8, page, "data-bind:name").?;
+    const name_err = std.mem.indexOf(u8, page, "data-text=\"$nameError\"").?;
+    const email_input = std.mem.indexOf(u8, page, "data-bind:email").?;
+    const email_err = std.mem.indexOf(u8, page, "data-text=\"$emailError\"").?;
+    try std.testing.expect(name_input < name_err);
+    try std.testing.expect(name_err < email_input);
+    try std.testing.expect(email_input < email_err);
 }
 
 test "renderPage boots the SSE stream and includes theming + datastar" {

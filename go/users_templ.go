@@ -22,7 +22,7 @@ import "strconv"
 
 // initialSignals is the initial Datastar signal state, emitted verbatim into
 // the body's data-signals attribute.
-const initialSignals = "{name: '', email: '', role: 'member', deleteId: '', deleteName: ''}"
+const initialSignals = "{name: '', email: '', role: 'member', deleteId: '', deleteName: '', addOpen: false, nameError: '', emailError: ''}"
 
 // DeleteButton is the per-row Delete button. It stashes the row's id and name
 // in data-* attributes and, on click, copies them into signals and opens the
@@ -234,9 +234,11 @@ func Content(users []User) templ.Component {
 	})
 }
 
-// AddForm is the shared inner form for the add-user dialog. Each field's error,
-// when present (non-empty), is shown directly beneath that field's input.
-func AddForm(nameErr, emailErr string) templ.Component {
+// AddForm is the shared inner form for the add-user dialog. Field errors are
+// driven by the $nameError / $emailError signals (data-text fills the message,
+// data-show hides the paragraph while empty), so the server reports validation
+// failures by patching signals rather than re-rendering the dialog.
+func AddForm() templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -257,53 +259,7 @@ func AddForm(nameErr, emailErr string) templ.Component {
 			templ_7745c5c3_Var11 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "<form method=\"dialog\"><h2>Add user</h2><label>Name<input data-bind:name placeholder=\"Jane Doe\"></label> ")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		if nameErr != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "<p class=\"field-error\">")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			var templ_7745c5c3_Var12 string
-			templ_7745c5c3_Var12, templ_7745c5c3_Err = templ.JoinStringErrs(nameErr)
-			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `users.templ`, Line: 66, Col: 35}
-			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var12))
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "</p>")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "<label>Email<input type=\"email\" data-bind:email placeholder=\"jane@example.com\"></label> ")
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		if emailErr != "" {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "<p class=\"field-error\">")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			var templ_7745c5c3_Var13 string
-			templ_7745c5c3_Var13, templ_7745c5c3_Err = templ.JoinStringErrs(emailErr)
-			if templ_7745c5c3_Err != nil {
-				return templ.Error{Err: templ_7745c5c3_Err, FileName: `users.templ`, Line: 70, Col: 36}
-			}
-			_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ.EscapeString(templ_7745c5c3_Var13))
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "</p>")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 21, "<label>Role <select data-bind:role><option value=\"member\">member</option> <option value=\"admin\">admin</option></select></label> <menu><button value=\"cancel\">Cancel</button> <button type=\"button\" class=\"primary\" data-on:click=\"@post('/users/')\">Save</button></menu></form>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 15, "<form method=\"dialog\"><h2>Add user</h2><label>Name<input data-bind:name placeholder=\"Jane Doe\"></label><p class=\"field-error\" data-show=\"$nameError\" data-text=\"$nameError\"></p><label>Email<input type=\"email\" data-bind:email placeholder=\"jane@example.com\"></label><p class=\"field-error\" data-show=\"$emailError\" data-text=\"$emailError\"></p><label>Role <select data-bind:role><option value=\"member\">member</option> <option value=\"admin\">admin</option></select></label> <menu><button value=\"cancel\">Cancel</button> <button type=\"button\" class=\"primary\" data-on:click=\"@post('/users/')\">Save</button></menu></form>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -311,9 +267,14 @@ func AddForm(nameErr, emailErr string) templ.Component {
 	})
 }
 
-// AddDialog is the add-user dialog. open renders it in the open state (used when
-// re-rendering after a validation error so the morph keeps it up).
-func AddDialog(open bool, nameErr, emailErr string) templ.Component {
+// AddDialog is the add-user dialog. Its open state is driven by the $addOpen
+// signal: data-effect opens the modal when the signal is set and closes it when
+// cleared (el.open guards against calling showModal on an already-open dialog,
+// which throws). data-on:close keeps the signal in sync when the user dismisses
+// the dialog with Escape or Cancel, and clears any field errors. The dialog is
+// never re-rendered by the server, so its open state is not disturbed; errors
+// arrive as signal patches (see AddForm).
+func AddDialog() templ.Component {
 	return templruntime.GeneratedTemplate(func(templ_7745c5c3_Input templruntime.GeneratedComponentInput) (templ_7745c5c3_Err error) {
 		templ_7745c5c3_W, ctx := templ_7745c5c3_Input.Writer, templ_7745c5c3_Input.Context
 		if templ_7745c5c3_CtxErr := ctx.Err(); templ_7745c5c3_CtxErr != nil {
@@ -329,30 +290,20 @@ func AddDialog(open bool, nameErr, emailErr string) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var14 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var14 == nil {
-			templ_7745c5c3_Var14 = templ.NopComponent
+		templ_7745c5c3_Var12 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var12 == nil {
+			templ_7745c5c3_Var12 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 22, "<dialog id=\"add-dialog\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 16, "<dialog id=\"add-dialog\" data-effect=\"$addOpen ? (el.open || el.showModal()) : el.close()\" data-on:close=\"$addOpen = false; $nameError = ''; $emailError = ''\">")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		if open {
-			templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 23, " open")
-			if templ_7745c5c3_Err != nil {
-				return templ_7745c5c3_Err
-			}
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 24, ">")
+		templ_7745c5c3_Err = AddForm().Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = AddForm(nameErr, emailErr).Render(ctx, templ_7745c5c3_Buffer)
-		if templ_7745c5c3_Err != nil {
-			return templ_7745c5c3_Err
-		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 25, "</dialog>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 17, "</dialog>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -378,25 +329,25 @@ func Page(users []User) templ.Component {
 			}()
 		}
 		ctx = templ.InitializeContext(ctx)
-		templ_7745c5c3_Var15 := templ.GetChildren(ctx)
-		if templ_7745c5c3_Var15 == nil {
-			templ_7745c5c3_Var15 = templ.NopComponent
+		templ_7745c5c3_Var13 := templ.GetChildren(ctx)
+		if templ_7745c5c3_Var13 == nil {
+			templ_7745c5c3_Var13 = templ.NopComponent
 		}
 		ctx = templ.ClearChildren(ctx)
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 26, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Users</title><script type=\"module\" src=\"/datastar.js\"></script><link rel=\"stylesheet\" href=\"/app.css\"></head><body data-signals=\"")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 18, "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Users</title><script type=\"module\" src=\"/static/datastar.js\"></script><link rel=\"stylesheet\" href=\"/static/app.css\"></head><body data-signals=\"")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		var templ_7745c5c3_Var16 string
-		templ_7745c5c3_Var16, templ_7745c5c3_Err = templ.ResolveAttributeValue(initialSignals)
+		var templ_7745c5c3_Var14 string
+		templ_7745c5c3_Var14, templ_7745c5c3_Err = templ.ResolveAttributeValue(initialSignals)
 		if templ_7745c5c3_Err != nil {
-			return templ.Error{Err: templ_7745c5c3_Err, FileName: `users.templ`, Line: 106, Col: 37}
+			return templ.Error{Err: templ_7745c5c3_Err, FileName: `users.templ`, Line: 109, Col: 37}
 		}
-		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var16)
+		_, templ_7745c5c3_Err = templ_7745c5c3_Buffer.WriteString(templ_7745c5c3_Var14)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 27, "\" data-init=\"@get('/updates')\"><h1>Users</h1><div class=\"toolbar\"><button class=\"primary\" data-on:click=\"document.getElementById('add-dialog').showModal()\">Add user</button> <span class=\"theme-tag\">Theme: <b id=\"theme-name\">…</b> (follows your system)</span></div>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 19, "\" data-init=\"@get('/updates')\"><h1>Users</h1><div class=\"toolbar\"><button class=\"primary\" data-on:click=\"$addOpen = true\">Add user</button> <span class=\"theme-tag\">Theme: <b id=\"theme-name\">…</b> (follows your system)</span></div>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
@@ -404,11 +355,11 @@ func Page(users []User) templ.Component {
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = AddDialog(false, "", "").Render(ctx, templ_7745c5c3_Buffer)
+		templ_7745c5c3_Err = AddDialog().Render(ctx, templ_7745c5c3_Buffer)
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}
-		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 28, "<dialog id=\"confirm-dialog\"><form method=\"dialog\"><h2>Delete user</h2><p>Really delete <strong data-text=\"$deleteName\"></strong>?</p><menu><button value=\"cancel\">Cancel</button> <button type=\"button\" class=\"danger\" data-on:click=\"@delete('/users/' + $deleteId); document.getElementById('confirm-dialog').close()\">Delete</button></menu></form></dialog><script src=\"/app.js\"></script></body></html>")
+		templ_7745c5c3_Err = templruntime.WriteString(templ_7745c5c3_Buffer, 20, "<dialog id=\"confirm-dialog\"><form method=\"dialog\"><h2>Delete user</h2><p>Really delete <strong data-text=\"$deleteName\"></strong>?</p><menu><button value=\"cancel\">Cancel</button> <button type=\"button\" class=\"danger\" data-on:click=\"@delete('/users/' + $deleteId); document.getElementById('confirm-dialog').close()\">Delete</button></menu></form></dialog><script src=\"/static/app.js\"></script></body></html>")
 		if templ_7745c5c3_Err != nil {
 			return templ_7745c5c3_Err
 		}

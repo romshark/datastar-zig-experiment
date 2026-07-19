@@ -122,8 +122,8 @@ func TestCreateUserPublishesAndClosesDialog(t *testing.T) {
 		t.Error("create did not publish")
 	}
 	out := rec.Body.String()
-	if !strings.Contains(out, "add-dialog") || !strings.Contains(out, "close()") {
-		t.Error("response should drive dialog close")
+	if !strings.Contains(out, "datastar-patch-signals") || !strings.Contains(out, `"addOpen":false`) {
+		t.Error("response should reset the form and clear $addOpen to close the dialog")
 	}
 	if strings.Contains(out, "Barbara Liskov") {
 		t.Error("command response must not carry the table")
@@ -144,7 +144,7 @@ func TestCreateInvalidEmailRerendersDialog(t *testing.T) {
 		t.Error("invalid input must not publish")
 	}
 	out := rec.Body.String()
-	for _, want := range []string{"datastar-patch-elements", "add-dialog", "valid email"} {
+	for _, want := range []string{"datastar-patch-signals", "emailError", "valid email"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("response missing %q", want)
 		}
@@ -165,19 +165,16 @@ func TestCreateEmptyNameRejected(t *testing.T) {
 
 func TestCreateReportsFieldErrorsIndependently(t *testing.T) {
 	s := newTestServer(t)
-	// Empty name AND invalid email: both errors present, name error under the
-	// name field (before the email input), email error after it.
+	// Empty name AND invalid email: both field-error signals are set with their
+	// own message, so each is shown beneath its own input by the template.
 	rec := do(t, s, "POST", "/users/", `{"name":"","email":"nope","role":"member"}`)
 	out := rec.Body.String()
 
-	nameErr := strings.Index(out, "Name is required.")
-	emailInput := strings.Index(out, "data-bind:email")
-	emailErr := strings.Index(out, "valid email address")
-	if nameErr < 0 || emailInput < 0 || emailErr < 0 {
-		t.Fatalf("missing markers: nameErr=%d emailInput=%d emailErr=%d", nameErr, emailInput, emailErr)
+	if !strings.Contains(out, `"nameError":"Name is required."`) {
+		t.Errorf("missing name error signal in %q", out)
 	}
-	if nameErr >= emailInput || emailInput >= emailErr {
-		t.Errorf("errors not positioned under their fields: %d %d %d", nameErr, emailInput, emailErr)
+	if !strings.Contains(out, `"emailError":"Please enter a valid email address."`) {
+		t.Errorf("missing email error signal in %q", out)
 	}
 }
 
@@ -225,8 +222,7 @@ func TestUpdatesInitialPush(t *testing.T) {
 	ts := httptest.NewServer(s.routes())
 	defer ts.Close()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/updates", nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

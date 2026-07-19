@@ -15,7 +15,7 @@ const Raw = struct {
         try writer.writeAll(self.s);
     }
 };
-const SIGNALS = Raw{ .s = "{name: '', email: '', role: 'member', deleteId: '', deleteName: ''}" };
+const SIGNALS = Raw{ .s = "{name: '', email: '', role: 'member', deleteId: '', deleteName: '', addOpen: false, nameError: '', emailError: ''}" };
 
 // The per-row Delete button. It stashes the row's id and name in `data-*`
 // attributes and, on click, copies them into signals and opens the shared
@@ -55,19 +55,17 @@ pub templ Content(users: []const db.User) {
     </main>
 }
 
-// Shared inner form for the add-user dialog. Each field's error, when present,
-// is shown directly beneath that field's input.
-templ AddForm(name_err: ?[]const u8, email_err: ?[]const u8) {
+// Shared inner form for the add-user dialog. Field errors are driven by the
+// `$nameError` / `$emailError` signals (data-text fills the message, data-show
+// hides the paragraph while empty), so the server reports validation failures by
+// patching signals rather than re-rendering the dialog.
+templ AddForm() {
     <form method="dialog">
         <h2>Add user</h2>
         <label>Name<input data-bind:name placeholder="Jane Doe" /></label>
-        if (name_err) |message| {
-            <p class="field-error">{message}</p>
-        }
+        <p class="field-error" data-show="$nameError" data-text="$nameError"></p>
         <label>Email<input type="email" data-bind:email placeholder="jane@example.com" /></label>
-        if (email_err) |message| {
-            <p class="field-error">{message}</p>
-        }
+        <p class="field-error" data-show="$emailError" data-text="$emailError"></p>
         <label>Role
             <select data-bind:role>
                 <option value="member">member</option>
@@ -81,20 +79,17 @@ templ AddForm(name_err: ?[]const u8, email_err: ?[]const u8) {
     </form>
 }
 
-// The add-user dialog. `open` controls whether it renders in the open state
-// (used when re-rendering after a validation error so the morph keeps it up).
-// zt cannot conditionally emit a bare `open` attribute, so we branch on the
-// whole element and share the form body via `@AddForm`.
-pub templ AddDialog(open: bool, name_err: ?[]const u8, email_err: ?[]const u8) {
-    if (open) {
-        <dialog id="add-dialog" open>
-            @AddForm(name_err, email_err)
-        </dialog>
-    } else {
-        <dialog id="add-dialog">
-            @AddForm(name_err, email_err)
-        </dialog>
-    }
+// The add-user dialog. Its open state is driven by the `$addOpen` signal:
+// data-effect opens the modal when the signal is set and closes it when cleared
+// (`el.open` guards against calling showModal on an already-open dialog, which
+// throws). data-on:close keeps the signal in sync when the user dismisses the
+// dialog with Escape or Cancel, and clears any field errors. The dialog is never
+// re-rendered by the server, so its open state is not disturbed; errors arrive
+// as signal patches (see AddForm).
+pub templ AddDialog() {
+    <dialog id="add-dialog" data-effect="$addOpen ? (el.open || el.showModal()) : el.close()" data-on:close="$addOpen = false; $nameError = ''; $emailError = ''">
+        @AddForm()
+    </dialog>
 }
 
 // The full HTML document (the shell that boots the SSE stream). The <style> and
@@ -158,11 +153,11 @@ pub templ Page(users: []const db.User) {
     <body data-signals={SIGNALS} data-init="@get('/updates')">
         <h1>Users</h1>
         <div class="toolbar">
-            <button class="primary" data-on:click="document.getElementById('add-dialog').showModal()">Add user</button>
+            <button class="primary" data-on:click="$addOpen = true">Add user</button>
             <span class="theme-tag">Theme: <b id="theme-name">…</b> (follows your system)</span>
         </div>
         @Content(users)
-        @AddDialog(false, null, null)
+        @AddDialog()
         <dialog id="confirm-dialog">
             <form method="dialog">
                 <h2>Delete user</h2>
